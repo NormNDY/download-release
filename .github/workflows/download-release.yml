@@ -1,4 +1,4 @@
-name: 🚀 Download Large File to Release
+name: "📥 Download Large File to Raw (Custom Folder)"
 
 on:
   workflow_dispatch:
@@ -6,33 +6,151 @@ on:
       url:
         description: '🔗 لینک مستقیم فایل'
         required: true
-      name:
-        description: '📛 نام فایل نهایی (مثلاً file.iso)'
+      file_name:
+        description: '📛 نام فایل نهایی (مثلاً neon.iso)'
         required: true
+      folder_name:
+        description: '📁 نام پوشه در raw_archives/ (اختیاری – پیش‌فرض: نام فایل)'
+        required: false
+        default: ''
+      custom_proxy:
+        description: '🌐 پروکسی دستی (اختیاری)'
+        required: false
+        default: ''
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
 
 jobs:
-  download-and-release:
+  download-and-raw-push:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    permissions:
-      contents: write
+
     steps:
-      - name: ⬇️ دانلود فایل
-        run: |
-          echo "در حال دانلود ${{ github.event.inputs.name }} از ${{ github.event.inputs.url }}"
-          # دانلود با قابلیت از سرگیری
-          curl -L -C - --retry 5 -o ${{ github.event.inputs.name }} "${{ github.event.inputs.url }}"
-
-      - name: ✂️ تقسیم فایل به قطعات ۲ گیگابایتی
-        run: |
-          mkdir -p release-assets
-          split -b 2G ${{ github.event.inputs.name }} release-assets/${{ github.event.inputs.name }}.
-          echo "تعداد قطعات ایجاد شده:"
-          find release-assets -maxdepth 1 -type f | wc -l
-
-      - name: 📤 آپلود قطعات در GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
         with:
-          name: "${{ github.event.inputs.name }} (Split Archive)"
-          body: "فایل `${{ github.event.inputs.name }}` به دلیل حجم بالا به قطعات ۲ گیگابایتی تقسیم و در این Release آپلود شده است."
-          files: release-assets/**
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: 🔧 نصب ابزارها
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq curl
+
+      - name: 🛡️ تنظیم پروکسی (WARP یا دستی)
+        id: proxy
+        run: |
+          if [ -n "$CUSTOM" ]; then
+            echo "🔹 پروکسی دستی: $CUSTOM"
+            echo "proxy_env=export http_proxy=$CUSTOM https_proxy=$CUSTOM" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "🛡️ راه‌اندازی WARP..."
+          docker run -d --name warp --restart=always \
+            -p 1080:1080 --cap-add NET_ADMIN \
+            -e WARP_ENABLE_WARP=yes \
+            caomingjun/warp
+          sleep 25
+          if curl -x socks5h://127.0.0.1:1080 -s --max-time 10 https://www.google.com > /dev/null; then
+            echo "proxy_env=export http_proxy=socks5h://127.0.0.1:1080 https_proxy=socks5h://127.0.0.1:1080" >> $GITHUB_OUTPUT
+            echo "✅ WARP فعال"
+          else
+            echo "proxy_env=" >> $GITHUB_OUTPUT
+            echo "⚠️ WARP در دسترس نیست"
+          fi
+        env:
+          CUSTOM: ${{ github.event.inputs.custom_proxy }}
+
+      - name: ⬇️ دانلود فایل (با قابلیت از سرگیری)
+        run: |
+          ${{ steps.proxy.outputs.proxy_env }}
+          echo "▸ دانلود $FILE_NAME از $URL"
+          curl -L -C - --retry 10 --retry-delay 30 -o "$FILE_NAME" "$URL"
+          ls -lh "$FILE_NAME"
+        env:
+          URL: ${{ github.event.inputs.url }}
+          FILE_NAME: ${{ github.event.inputs.file_name }}
+
+      - name: ✂️ تقسیم فایل به قطعات ۹۵ مگابایتی
+        run: |
+          # تعیین نام پوشه نهایی
+          if [ -z "$FOLDER_NAME" ]; then
+            FOLDER_NAME="$FILE_NAME"
+          fi
+          CHUNK_DIR="raw_archives/$FOLDER_NAME"
+          mkdir -p "$CHUNK_DIR"
+          split -b 95M "$FILE_NAME" "$CHUNK_DIR/$FILE_NAME.part"
+          echo "✅ تعداد قطعات: $(find "$CHUNK_DIR" -type f | wc -l)"
+          ls -lh "$CHUNK_DIR"
+        env:
+          FILE_NAME: ${{ github.event.inputs.file_name }}
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
+
+      - name: 📝 ایجاد README برای راهنما
+        run: |
+          if [ -z "$FOLDER_NAME" ]; then
+            FOLDER_NAME="$FILE_NAME"
+          fi
+          CHUNK_DIR="raw_archives/$FOLDER_NAME"
+          echo "# 📦 فایل $FILE_NAME" > "$CHUNK_DIR/README.md"
+          echo "" >> "$CHUNK_DIR/README.md"
+          echo "این فایل به دلیل حجم بالا به قطعات ۹۵MB تقسیم شده است." >> "$CHUNK_DIR/README.md"
+          echo "برای بازسازی فایل اصلی، تمام قطعات را در یک پوشه دانلود کرده و دستور زیر را اجرا کنید:" >> "$CHUNK_DIR/README.md"
+          echo '```bash' >> "$CHUNK_DIR/README.md"
+          echo "cat $FILE_NAME.part* > $FILE_NAME" >> "$CHUNK_DIR/README.md"
+          echo '```' >> "$CHUNK_DIR/README.md"
+          echo "" >> "$CHUNK_DIR/README.md"
+          echo "## لینک‌های دانلود (Raw)" >> "$CHUNK_DIR/README.md"
+          for f in "$CHUNK_DIR"/*.part*; do
+            PART_NAME=$(basename "$f")
+            RAW_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/raw_archives/$FOLDER_NAME/$PART_NAME"
+            echo "- [$PART_NAME]($RAW_URL)" >> "$CHUNK_DIR/README.md"
+          done
+        env:
+          FILE_NAME: ${{ github.event.inputs.file_name }}
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
+
+      - name: 📤 Push قطعات به مخزن (مقاوم)
+        run: |
+          if [ -z "$FOLDER_NAME" ]; then
+            FOLDER_NAME="$FILE_NAME"
+          fi
+          CHUNK_DIR="raw_archives/$FOLDER_NAME"
+
+          set +e
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+
+          git add "$CHUNK_DIR/"
+          if ! git diff --cached --quiet; then
+            TOTAL_PARTS=$(find "$CHUNK_DIR" -type f -name "*.part*" | wc -l)
+            git commit -m "📦 افزودن قطعات فایل $FILE_NAME به پوشه $FOLDER_NAME ($TOTAL_PARTS قطعه)"
+
+            git config http.postBuffer 524288000
+
+            git stash 2>/dev/null || true
+            git pull --rebase origin "${GITHUB_REF_NAME}" || {
+              echo "⚠️ rebase ناموفق، تلاش مستقیم..."
+              git rebase --abort 2>/dev/null || true
+              git pull origin "${GITHUB_REF_NAME}" --no-rebase || echo "ادامه بدون pull"
+            }
+            git stash pop 2>/dev/null || true
+
+            for i in 1 2 3; do
+              if git push origin "${GITHUB_REF_NAME}"; then
+                echo "✅ Push موفق"
+                break
+              else
+                echo "⚠️ تلاش $i ناموفق، ۳ ثانیه صبر..."
+                sleep 3
+              fi
+            done || echo "❌ Push نهایی نشد. ممکن است نیاز به اجرای دستی داشته باشید."
+          else
+            echo "ℹ️ تغییری برای commit وجود ندارد"
+          fi
+          set -e
+        env:
+          FILE_NAME: ${{ github.event.inputs.file_name }}
+          FOLDER_NAME: ${{ github.event.inputs.folder_name }}
