@@ -1,0 +1,38 @@
+name: 🚀 Download Large File to Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: '🔗 لینک مستقیم فایل'
+        required: true
+      name:
+        description: '📛 نام فایل نهایی (مثلاً file.iso)'
+        required: true
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    steps:
+      - name: ⬇️ دانلود فایل
+        run: |
+          echo "در حال دانلود ${{ github.event.inputs.name }} از ${{ github.event.inputs.url }}"
+          # دانلود با قابلیت از سرگیری
+          curl -L -C - --retry 5 -o ${{ github.event.inputs.name }} "${{ github.event.inputs.url }}"
+
+      - name: ✂️ تقسیم فایل به قطعات ۲ گیگابایتی
+        run: |
+          mkdir -p release-assets
+          split -b 2G ${{ github.event.inputs.name }} release-assets/${{ github.event.inputs.name }}.
+          echo "تعداد قطعات ایجاد شده:"
+          find release-assets -maxdepth 1 -type f | wc -l
+
+      - name: 📤 آپلود قطعات در GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ github.event.inputs.name }} (Split Archive)"
+          body: "فایل `${{ github.event.inputs.name }}` به دلیل حجم بالا به قطعات ۲ گیگابایتی تقسیم و در این Release آپلود شده است."
+          files: release-assets/**
